@@ -432,19 +432,20 @@
 let stream = null;
 let frozen = false;
 let frozenFrame = null;
-let animFrame = null;
 let facingMode = 'environment';
-let detectionMode = 'size'; // 'size' | 'color' | 'both'
-let queenHistory = []; // rolling average for stable detection
-const HISTORY_LEN = 5;
+let detectionMode = 'size';
 
-const video = document.getElementById('video');
+// Temporal stability: track queen position across frames
+const HISTORY_LEN = 8;
+let queenHistory = []; // {x, y, w, h, score} or null
+
+const video  = document.getElementById('video');
 const overlay = document.getElementById('overlay');
-const proc = document.getElementById('processing');
-const ctx = overlay.getContext('2d');
-const pctx = proc.getContext('2d', { willReadFrequently: true });
+const proc   = document.getElementById('processing');
+const ctx    = overlay.getContext('2d');
+const pctx   = proc.getContext('2d', { willReadFrequently: true });
 
-// ─── Camera ──────────────────────────────────────────────────────────────────
+// ─── Camera ───────────────────────────────────────────────────────────────────
 async function startCamera() {
   document.getElementById('startScreen').style.display = 'none';
   try {
@@ -455,28 +456,25 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
     resizeCanvases();
-    loop();
-  } catch (e) {
+    requestAnimationFrame(loop);
+  } catch(e) {
     document.getElementById('noCameraMsg').style.display = 'flex';
-    console.error(e);
   }
 }
 
 async function switchCamera() {
   facingMode = facingMode === 'environment' ? 'user' : 'environment';
-  if (stream) { stream.getTracks().forEach(t => t.stop()); }
+  if (stream) stream.getTracks().forEach(t => t.stop());
   frozen = false;
   await startCamera();
 }
 
 function resizeCanvases() {
-  const vw = video.videoWidth || video.clientWidth;
-  const vh = video.videoHeight || video.clientHeight;
-  overlay.width = proc.width = vw;
-  overlay.height = proc.height = vh;
+  overlay.width = proc.width  = video.videoWidth  || video.clientWidth;
+  overlay.height= proc.height = video.videoHeight || video.clientHeight;
 }
 
-// ─── Sliders ─────────────────────────────────────────────────────────────────
+// ─── UI helpers ───────────────────────────────────────────────────────────────
 const sizeSlider = document.getElementById('sizeThresh');
 const sensSlider = document.getElementById('sensitivity');
 sizeSlider.addEventListener('input', () => {
@@ -489,39 +487,34 @@ sensSlider.addEventListener('input', () => {
 function setMode(m) {
   detectionMode = m;
   ['modeSize','modeColor','modeBoth'].forEach(id => document.getElementById(id).classList.remove('active'));
-  document.getElementById('mode' + m.charAt(0).toUpperCase() + m.slice(1)).classList.add('active');
+  document.getElementById('mode' + m[0].toUpperCase() + m.slice(1)).classList.add('active');
 }
 
-// ─── Freeze ───────────────────────────────────────────────────────────────────
 function toggleFreeze() {
   if (!frozen) {
-    // Flash effect
     const flash = document.getElementById('freezeFlash');
     flash.style.opacity = '0.7';
     setTimeout(() => flash.style.opacity = '0', 150);
-    // Capture current frame
     frozenFrame = pctx.getImageData(0, 0, proc.width, proc.height);
     frozen = true;
     document.querySelector('.btn-row button').textContent = '▶ Fortfahren';
   } else {
-    frozen = false;
-    frozenFrame = null;
+    frozen = false; frozenFrame = null;
     document.querySelector('.btn-row button').textContent = '📷 Einfrieren';
   }
 }
 
 function resetDetection() {
   queenHistory = [];
-  frozen = false;
-  frozenFrame = null;
+  frozen = false; frozenFrame = null;
   document.querySelector('.btn-row button').textContent = '📷 Einfrieren';
   document.getElementById('statusPill').textContent = 'BEREIT';
   document.getElementById('statusPill').className = 'status-pill';
 }
 
-// ─── Main Loop ────────────────────────────────────────────────────────────────
+// ─── Main loop ────────────────────────────────────────────────────────────────
 function loop() {
-  animFrame = requestAnimationFrame(loop);
+  requestAnimationFrame(loop);
   if (!frozen) {
     if (video.readyState < 2) return;
     if (proc.width !== video.videoWidth) resizeCanvases();
@@ -532,288 +525,325 @@ function loop() {
   detect();
 }
 
-// ─── Detection ────────────────────────────────────────────────────────────────
+// ─── Core detection ───────────────────────────────────────────────────────────
 function detect() {
   const W = proc.width, H = proc.height;
   if (!W || !H) return;
 
-  const imageData = pctx.getImageData(0, 0, W, H);
-  const data = imageData.data;
+  const raw = pctx.getImageData(0, 0, W, H).data;
 
-  const minArea = parseInt(sensSlider.value);
-  const sizeRatio = parseFloat(sizeSlider.value);
+  // === STEP 1: Per-pixel feature extraction (downsampled 3×) ==================
+  const SC = 3;
+  const SW = Math.floor(W / SC), SH = Math.floor(H / SC);
+  const N  = SW * SH;
 
-  // 1. Build grayscale + extract blobs via simple row-scan segmentation
-  // We work with a downsampled grid for performance
-  const SCALE = 4; // process every 4th pixel
-  const SW = Math.floor(W / SCALE), SH = Math.floor(H / SCALE);
-
-  // Brightness + color maps
-  const bright = new Uint8Array(SW * SH);
-  const hueMap = new Float32Array(SW * SH);
-  const satMap = new Uint8Array(SW * SH);
+  const lum = new Uint8Array(N);   // luminance
+  const hue = new Float32Array(N); // 0-360
+  const sat = new Uint8Array(N);   // 0-100
+  const isBeeCol = new Uint8Array(N); // is this pixel bee-coloured?
 
   for (let sy = 0; sy < SH; sy++) {
     for (let sx = 0; sx < SW; sx++) {
-      const px = (sy * SCALE * W + sx * SCALE) * 4;
-      const r = data[px], g = data[px+1], b = data[px+2];
-      bright[sy * SW + sx] = Math.round(0.299*r + 0.587*g + 0.114*b);
-      const [h, s] = rgbToHs(r, g, b);
-      hueMap[sy * SW + sx] = h;
-      satMap[sy * SW + sx] = s;
+      const pi = (sy * SC * W + sx * SC) * 4;
+      const r = raw[pi], g = raw[pi+1], b = raw[pi+2];
+      const L = (r*77 + g*150 + b*29) >> 8;
+      lum[sy*SW+sx] = L;
+      const [h, s] = rgbToHSV(r, g, b);
+      hue[sy*SW+sx] = h;
+      sat[sy*SW+sx] = s;
+      // Bee brown/amber range: hue 18-45°, moderate sat/lum
+      isBeeCol[sy*SW+sx] = (h>=15 && h<=55 && s>=20 && s<=85 && L>35 && L<210) ? 1 : 0;
     }
   }
 
-  // 2. Find connected components (blobs) using flood-fill on thresholded bright
-  const threshold = 60; // pixels darker than this are "bee" on bright comb
-  // Adaptive: use mean brightness to decide approach
-  let meanBright = 0;
-  for (let i = 0; i < bright.length; i++) meanBright += bright[i];
-  meanBright /= bright.length;
+  // === STEP 2: Adaptive threshold for foreground/background ==================
+  // Otsu's method on luminance histogram
+  const hist = new Int32Array(256);
+  for (let i = 0; i < N; i++) hist[lum[i]]++;
+  const otsuT = otsuThreshold(hist, N);
 
-  // Label map
-  const labels = new Int32Array(SW * SH).fill(-1);
-  let labelCount = 0;
-  const blobStats = []; // {minX, maxX, minY, maxY, pixels, sumHue, sumSat, colorPixels}
+  // Decide polarity: if mean lum > 110 => comb is bright, bees are dark
+  let sumL = 0;
+  for (let i = 0; i < N; i++) sumL += lum[i];
+  const meanL = sumL / N;
+  const brightBg = meanL > 110;
 
-  // Decide: bees are darker than background (light comb) or we just look for any connected region
-  // We'll segment by finding regions of similar brightness using a simple threshold
-  const isBee = (i) => {
-    if (meanBright > 120) {
-      // Light background (empty comb / flash) → bees are darker
-      return bright[i] < meanBright - 25;
+  // Foreground mask: bee pixels
+  const fg = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (brightBg) {
+      fg[i] = lum[i] < otsuT ? 1 : 0;
     } else {
-      // Dark background → bees are lighter than very dark areas but still organic
-      return bright[i] > 30 && bright[i] < 220;
+      fg[i] = (lum[i] > 30 && lum[i] < otsuT + 60) ? 1 : 0;
     }
-  };
+  }
 
-  const stack = [];
-  for (let i = 0; i < SW * SH; i++) {
-    if (labels[i] !== -1 || !isBee(i)) continue;
-    // BFS
-    const label = labelCount++;
-    const stat = { minX: SW, maxX: 0, minY: SH, maxY: 0, pixels: 0, sumHue: 0, sumSat: 0, colorPixels: 0 };
+  // === STEP 3: Connected components with shape & colour stats =================
+  const labels = new Int32Array(N).fill(-1);
+  const blobs  = [];
+  const stack  = [];
+
+  for (let seed = 0; seed < N; seed++) {
+    if (labels[seed] !== -1 || !fg[seed]) continue;
+
+    const blob = {
+      minX:SW, maxX:0, minY:SH, maxY:0,
+      px:0,           // total foreground pixels
+      beePx:0,        // pixels in bee-colour range
+      markerPx:0,     // pixels matching marker colour
+      markerHue:0,    // dominant marker hue sum
+      sumX:0, sumY:0  // centroid sums
+    };
+
     stack.length = 0;
-    stack.push(i);
-    labels[i] = label;
+    stack.push(seed);
+    labels[seed] = blobs.length;
+
     while (stack.length) {
       const cur = stack.pop();
-      const cx = cur % SW, cy = Math.floor(cur / SW);
-      stat.pixels++;
-      stat.minX = Math.min(stat.minX, cx);
-      stat.maxX = Math.max(stat.maxX, cx);
-      stat.minY = Math.min(stat.minY, cy);
-      stat.maxY = Math.max(stat.maxY, cy);
-      // Check for color marking (saturated, non-bee-brown hue)
-      const s = satMap[cur], h = hueMap[cur];
-      if (s > 80 && isMarkerColor(h)) {
-        stat.sumHue += h;
-        stat.sumSat += s;
-        stat.colorPixels++;
+      const cx = cur % SW, cy = (cur / SW) | 0;
+
+      blob.px++;
+      blob.sumX += cx; blob.sumY += cy;
+      if (cx < blob.minX) blob.minX = cx;
+      if (cx > blob.maxX) blob.maxX = cx;
+      if (cy < blob.minY) blob.minY = cy;
+      if (cy > blob.maxY) blob.maxY = cy;
+      if (isBeeCol[cur]) blob.beePx++;
+
+      // Marker colour check (high sat, non-bee hue)
+      const s = sat[cur], h = hue[cur];
+      if (s > 55 && !isBeeCol[cur] && isMarkerHue(h)) {
+        blob.markerPx++;
+        blob.markerHue += h;
       }
-      // 4-neighbors
-      const neighbors = [cur-1, cur+1, cur-SW, cur+SW];
-      for (const n of neighbors) {
-        if (n < 0 || n >= SW*SH) continue;
-        if (labels[n] !== -1) continue;
+
+      // 4-connected neighbours
+      const ns = [cur-1, cur+1, cur-SW, cur+SW];
+      for (const n of ns) {
+        if (n < 0 || n >= N || labels[n] !== -1) continue;
         const nx = n % SW;
-        if (Math.abs(nx - (cx)) > 1 && (n === cur-1 || n === cur+1)) continue; // wrap guard
-        if (isBee(n)) { labels[n] = label; stack.push(n); }
+        if ((n === cur-1 || n === cur+1) && Math.abs(nx - cx) > 1) continue;
+        if (fg[n]) { labels[n] = blobs.length; stack.push(n); }
       }
     }
-    if (stat.pixels >= minArea) blobStats.push(stat);
+    blobs.push(blob);
   }
 
-  // 3. Compute blob dimensions in original pixels
-  const blobs = blobStats.map(s => ({
-    x: s.minX * SCALE,
-    y: s.minY * SCALE,
-    w: (s.maxX - s.minX + 1) * SCALE,
-    h: (s.maxY - s.minY + 1) * SCALE,
-    area: s.pixels * SCALE * SCALE,
-    colorScore: s.colorPixels / Math.max(s.pixels, 1),
-    hasMarker: s.colorPixels > 3
-  }));
+  // === STEP 4: Filter & shape analysis ========================================
+  const minPx  = parseInt(sensSlider.value);  // minimum blob size
+  const sizeT  = parseFloat(sizeSlider.value); // size ratio threshold
 
-  // 4. Score each blob as potential queen
-  // Median area = typical worker bee
-  blobs.sort((a, b) => a.area - b.area);
-  const medianArea = blobs.length ? blobs[Math.floor(blobs.length / 2)].area : 0;
-  const medianAspect = 2.2; // typical worker bee elongation
+  // Convert to pixel-space measurements
+  const candidates = blobs
+    .filter(b => b.px >= minPx)
+    .map(b => {
+      const bw = (b.maxX - b.minX + 1) * SC;
+      const bh = (b.maxY - b.minY + 1) * SC;
+      const area  = b.px * SC * SC;
+      const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
+      const beeFrac  = b.beePx / b.px;       // fraction of bee-coloured pixels
+      const markerFrac = b.markerPx / b.px;  // fraction of marker pixels
 
-  const scored = blobs.map(b => {
+      // SHAPE FILTER: reject blobs that are too square/round (wax cells, debris)
+      // Bees are elongated: aspect ratio typically 1.5 – 4.0
+      const shapeOk = aspect >= 1.3 && aspect <= 5.5;
+
+      // COLOUR FILTER: blob should be at least 20% bee-coloured OR have marker
+      const colourOk = beeFrac > 0.18 || markerFrac > 0.05;
+
+      return {
+        x: b.minX * SC, y: b.minY * SC, w: bw, h: bh,
+        area, aspect, beeFrac, markerFrac,
+        hasMarker: b.markerPx >= 4,
+        shapeOk, colourOk,
+        cx: (b.sumX / b.px) * SC,
+        cy: (b.sumY / b.px) * SC
+      };
+    })
+    .filter(b => b.shapeOk && b.colourOk);  // ← KEY: discard non-bee blobs
+
+  // === STEP 5: Scoring =========================================================
+  // Compute median area of valid candidates (= typical worker bee)
+  const sorted = [...candidates].sort((a,b) => a.area - b.area);
+  const medArea = sorted.length ? sorted[Math.floor(sorted.length/2)].area : 0;
+
+  const scored = candidates.map(b => {
+    const relSize = medArea > 0 ? b.area / medArea : 1;
     let score = 0;
-    const relSize = medianArea > 0 ? b.area / medianArea : 1;
-    const aspect = b.w > b.h ? b.w / b.h : b.h / b.w;
 
-    // Size scoring
+    // ── Size component ──
     if (detectionMode !== 'color') {
-      if (relSize >= sizeRatio) {
-        score += Math.min(60, (relSize - 1) * 40);
+      if (relSize >= sizeT) {
+        // Progressive score, capped: very large blobs (merged) get less benefit
+        score += Math.min(55, (relSize - 1) * 38);
       }
-      // Elongation bonus (queen is more elongated)
-      if (aspect > medianAspect * 0.8) score += 15;
+      // Elongation sweet-spot for queen (aspect 1.8-3.5)
+      if (b.aspect >= 1.8 && b.aspect <= 3.5) score += 12;
+      // Penalise if way too big (likely merged cluster, not a single bee)
+      if (relSize > 4.5) score -= 20;
     }
 
-    // Color scoring
+    // ── Colour-marker component ──
     if (detectionMode !== 'size') {
-      if (b.hasMarker) score += 80;
-      score += b.colorScore * 40;
+      if (b.hasMarker) score += 75;
+      score += b.markerFrac * 50;
     }
 
-    // In 'both' mode: combine
     return { ...b, score, relSize };
   });
 
-  // 5. Find best candidate
-  scored.sort((a, b) => b.score - a.score);
-  const queen = scored.length > 0 && scored[0].score > 15 ? scored[0] : null;
+  scored.sort((a,b) => b.score - a.score);
 
-  // Rolling history for stability
-  queenHistory.push(queen ? 1 : 0);
+  // === STEP 6: Temporal smoothing =============================================
+  // Only accept a detection if score is high enough
+  const MIN_SCORE = detectionMode === 'color' ? 30 : 18;
+  const rawQueen = scored.length > 0 && scored[0].score >= MIN_SCORE ? scored[0] : null;
+
+  queenHistory.push(rawQueen);
   if (queenHistory.length > HISTORY_LEN) queenHistory.shift();
-  const confidence = queenHistory.reduce((a, b) => a + b, 0) / queenHistory.length;
 
-  // 6. Draw overlay
-  ctx.clearRect(0, 0, W, H);
+  // Require detection in at least 40% of recent frames to show result
+  const detections = queenHistory.filter(q => q !== null);
+  const stability  = detections.length / queenHistory.length;
 
-  // Draw all candidate blobs (faint)
-  if (scored.length > 0) {
-    scored.slice(0, 20).forEach((b, i) => {
-      if (i === 0 && b.score > 15) return; // skip queen, drawn separately
-      if (b.score > 5) {
-        ctx.strokeStyle = 'rgba(232,160,32,0.2)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(b.x, b.y, b.w, b.h);
-      }
-    });
+  let queen = null;
+  if (stability >= 0.4 && detections.length >= 2) {
+    // Average position over recent detections for smoother overlay
+    const avgX = detections.reduce((s,q)=>s+q.x,0) / detections.length;
+    const avgY = detections.reduce((s,q)=>s+q.y,0) / detections.length;
+    const avgW = detections.reduce((s,q)=>s+q.w,0) / detections.length;
+    const avgH = detections.reduce((s,q)=>s+q.h,0) / detections.length;
+    queen = { ...detections[detections.length-1], x:avgX, y:avgY, w:avgW, h:avgH, stability };
   }
 
-  // Draw queen detection
-  if (queen && queen.score > 15) {
+  // === STEP 7: Draw overlay ====================================================
+  ctx.clearRect(0, 0, W, H);
+
+  // Faint boxes for other candidates
+  scored.slice(1, 15).forEach(b => {
+    if (b.score > 8) {
+      ctx.strokeStyle = 'rgba(232,160,32,0.18)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    }
+  });
+
+  if (queen) {
     const cx = queen.x + queen.w / 2;
     const cy = queen.y + queen.h / 2;
-    const r = Math.max(queen.w, queen.h) / 2 + 18;
+    const r  = Math.max(queen.w, queen.h) / 2 + 20;
 
-    // Outer glow ring
-    const grad = ctx.createRadialGradient(cx, cy, r * 0.6, cx, cy, r + 20);
-    grad.addColorStop(0, 'rgba(0,255,136,0.25)');
+    // Glow
+    const grad = ctx.createRadialGradient(cx, cy, r*0.5, cx, cy, r+24);
+    grad.addColorStop(0, 'rgba(0,255,136,0.22)');
     grad.addColorStop(1, 'rgba(0,255,136,0)');
     ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + 20, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, r+24, 0, Math.PI*2); ctx.fill();
 
-    // Animated dashes circle
+    // Spinning dashes
     ctx.save();
     ctx.strokeStyle = '#00ff88';
     ctx.lineWidth = 2.5;
-    ctx.setLineDash([8, 5]);
-    ctx.lineDashOffset = -Date.now() / 40;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.setLineDash([9, 5]);
+    ctx.lineDashOffset = -Date.now() / 38;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
     ctx.restore();
 
-    // Inner crosshair lines
-    ctx.strokeStyle = 'rgba(0,255,136,0.5)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 4]);
+    // Crosshair
+    ctx.strokeStyle = 'rgba(0,255,136,0.45)';
+    ctx.lineWidth = 1; ctx.setLineDash([3,4]);
     ctx.beginPath();
-    ctx.moveTo(cx - r - 10, cy); ctx.lineTo(cx + r + 10, cy);
-    ctx.moveTo(cx, cy - r - 10); ctx.lineTo(cx, cy + r + 10);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.moveTo(cx-r-12,cy); ctx.lineTo(cx+r+12,cy);
+    ctx.moveTo(cx,cy-r-12); ctx.lineTo(cx,cy+r+12);
+    ctx.stroke(); ctx.setLineDash([]);
 
-    // Bounding box
-    ctx.strokeStyle = '#00ff88';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(queen.x - 4, queen.y - 4, queen.w + 8, queen.h + 8);
+    // Box
+    ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2;
+    ctx.strokeRect(queen.x-4, queen.y-4, queen.w+8, queen.h+8);
 
-    // Label tag
-    const tag = queen.hasMarker ? '♛ KÖNIGIN (markiert)' : '♛ KÖNIGIN (Grösse)';
+    // Label
+    const reason = queen.hasMarker ? 'Farbmarkierung' : `${queen.relSize.toFixed(1)}× Median`;
+    const tag = `♛ KÖNIGIN  [${reason}]`;
     ctx.font = 'bold 13px JetBrains Mono, monospace';
     const tw = ctx.measureText(tag).width;
-    const tx = Math.max(4, Math.min(W - tw - 12, cx - tw / 2));
-    const ty = queen.y - 14 < 20 ? queen.y + queen.h + 22 : queen.y - 10;
-    ctx.fillStyle = 'rgba(0,20,10,0.8)';
-    ctx.roundRect(tx - 6, ty - 14, tw + 12, 20, 4);
-    ctx.fill();
+    const tx = Math.max(4, Math.min(W-tw-14, cx-tw/2));
+    const ty = queen.y - 16 < 22 ? queen.y + queen.h + 22 : queen.y - 10;
+
+    ctx.fillStyle = 'rgba(0,18,8,0.85)';
+    roundRect(ctx, tx-6, ty-15, tw+12, 22, 4); ctx.fill();
     ctx.fillStyle = '#00ff88';
     ctx.fillText(tag, tx, ty);
 
-    // Score badge
-    const scoreTxt = `Score: ${Math.round(queen.score)} | ${(queen.relSize).toFixed(1)}× Median`;
-    ctx.font = '10px JetBrains Mono, monospace';
-    const sw2 = ctx.measureText(scoreTxt).width;
-    ctx.fillStyle = 'rgba(0,20,10,0.7)';
-    ctx.roundRect(tx - 6, ty + 6, sw2 + 12, 16, 3);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(0,255,136,0.7)';
-    ctx.fillText(scoreTxt, tx, ty + 18);
+    // Confidence bar
+    const barW = tw + 12;
+    ctx.fillStyle = 'rgba(0,18,8,0.7)';
+    roundRect(ctx, tx-6, ty+6, barW, 10, 3); ctx.fill();
+    ctx.fillStyle = `hsl(${140 * stability}, 90%, 55%)`;
+    roundRect(ctx, tx-6, ty+6, barW * stability, 10, 3); ctx.fill();
   }
 
-  // 7. Update UI
+  // === STEP 8: Update UI =======================================================
   const pill = document.getElementById('statusPill');
-  if (queen && queen.score > 15) {
+  if (queen) {
     pill.textContent = '♛ GEFUNDEN';
     pill.className = 'status-pill found';
   } else {
-    pill.textContent = 'SUCHE...';
+    pill.textContent = queenHistory.length < 3 ? 'INITIALISIERUNG…' : 'SUCHE…';
     pill.className = 'status-pill';
   }
 
-  document.getElementById('blobCount').textContent = blobs.length;
-  document.getElementById('candCount').textContent = scored.filter(b => b.score > 5).length;
-  document.getElementById('confVal').textContent = Math.round(confidence * 100) + '%';
+  document.getElementById('blobCount').textContent = candidates.length;
+  document.getElementById('candCount').textContent = scored.filter(b=>b.score>=MIN_SCORE).length;
+  document.getElementById('confVal').textContent   = Math.round(stability*100) + '%';
 }
 
-// ─── Color Helpers ─────────────────────────────────────────────────────────────
-function rgbToHs(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r,g,b), min = Math.min(r,g,b);
-  const d = max - min;
-  const s = max === 0 ? 0 : d / max;
-  let h = 0;
-  if (d !== 0) {
-    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-    else if (max === g) h = ((b - r) / d + 2) / 6;
-    else h = ((r - g) / d + 4) / 6;
+// ─── Colour helpers ───────────────────────────────────────────────────────────
+function rgbToHSV(r, g, b) {
+  r/=255; g/=255; b/=255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+  const s = max===0 ? 0 : d/max;
+  let h=0;
+  if (d!==0) {
+    if      (max===r) h=((g-b)/d + (g<b?6:0))/6;
+    else if (max===g) h=((b-r)/d + 2)/6;
+    else              h=((r-g)/d + 4)/6;
   }
-  return [h * 360, Math.round(s * 100)];
+  return [h*360, Math.round(s*100)];
 }
 
-// Standard international queen marking colors:
-// White (0), Yellow (1), Red (2), Green (3), Blue (4)
-// Also detect generic bright non-bee colors
-function isMarkerColor(h) {
-  // Yellow/white: 30-70°
-  if (h >= 30 && h <= 75) return true;
-  // Red/pink: 345-360 or 0-20
-  if (h >= 345 || h <= 20) return true;
-  // Green: 90-150
-  if (h >= 90 && h <= 150) return true;
-  // Blue: 200-260
-  if (h >= 200 && h <= 260) return true;
+// Only the vivid non-amber international marking colours
+function isMarkerHue(h) {
+  if (h>=340 || h<=12)  return true;  // red
+  if (h>=55  && h<=80)  return true;  // yellow (narrow – avoids pollen/wax)
+  if (h>=95  && h<=145) return true;  // green
+  if (h>=200 && h<=255) return true;  // blue/white
   return false;
 }
 
-// ─── CanvasRenderingContext2D.roundRect polyfill for older browsers
-if (!CanvasRenderingContext2D.prototype.roundRect) {
-  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
-    this.beginPath();
-    this.moveTo(x + r, y);
-    this.lineTo(x + w - r, y);
-    this.quadraticCurveTo(x + w, y, x + w, y + r);
-    this.lineTo(x + w, y + h - r);
-    this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    this.lineTo(x + r, y + h);
-    this.quadraticCurveTo(x, y + h, x, y + h - r);
-    this.lineTo(x, y + r);
-    this.quadraticCurveTo(x, y, x + r, y);
-    this.closePath();
-  };
+// Otsu threshold (1D)
+function otsuThreshold(hist, total) {
+  let sumAll=0;
+  for(let i=0;i<256;i++) sumAll+=i*hist[i];
+  let sumB=0, wB=0, best=0, t=0;
+  for(let i=0;i<256;i++){
+    wB+=hist[i]; if(!wB) continue;
+    const wF=total-wB; if(!wF) break;
+    sumB+=i*hist[i];
+    const mB=sumB/wB, mF=(sumAll-sumB)/wF;
+    const v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>best){best=v;t=i;}
+  }
+  return t;
+}
+
+function roundRect(c,x,y,w,h,r){
+  c.beginPath();
+  c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);
+  c.closePath();
 }
 
 window.addEventListener('resize', resizeCanvases);
