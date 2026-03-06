@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Königinnen-Detektor</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Spectral:wght@300;400;600&family=JetBrains+Mono:wght@400;700&display=swap');
+
+  :root {
+    --honey: #e8a020;
+    --deep: #1a1108;
+    --wax: #f5e6c8;
+    --comb: #2d1f0a;
+    --found: #00ff88;
+    --mark: #ff3366;
+    --amber: #c4720a;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--deep);
+    color: var(--wax);
+    font-family: 'Spectral', serif;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Hexagon background pattern */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: 
+      radial-gradient(circle at 20% 50%, rgba(232,160,32,0.06) 0%, transparent 50%),
+      radial-gradient(circle at 80% 20%, rgba(196,114,10,0.08) 0%, transparent 40%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  header {
+    padding: 12px 20px 10px;
+    background: linear-gradient(180deg, rgba(26,17,8,0.98) 0%, rgba(26,17,8,0.85) 100%);
+    border-bottom: 1px solid rgba(232,160,32,0.2);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .title-group { display: flex; align-items: baseline; gap: 10px; }
+
+  h1 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--honey);
+  }
+
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: rgba(245,230,200,0.4);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .status-pill {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: rgba(232,160,32,0.1);
+    border: 1px solid rgba(232,160,32,0.25);
+    color: var(--honey);
+    letter-spacing: 0.08em;
+    transition: all 0.3s;
+  }
+  .status-pill.found {
+    background: rgba(0,255,136,0.15);
+    border-color: rgba(0,255,136,0.4);
+    color: var(--found);
+    animation: pulse-found 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-found {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.3); }
+    50% { box-shadow: 0 0 0 6px rgba(0,255,136,0); }
+  }
+
+  /* Camera viewport */
+  .viewport {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    background: #000;
+  }
+
+  video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  canvas#overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  canvas#processing {
+    display: none;
+  }
+
+  /* Corner frame decoration */
+  .frame-corner {
+    position: absolute;
+    width: 28px; height: 28px;
+    border-color: var(--honey);
+    border-style: solid;
+    opacity: 0.6;
+    z-index: 5;
+  }
+  .frame-corner.tl { top: 12px; left: 12px; border-width: 2px 0 0 2px; }
+  .frame-corner.tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; }
+  .frame-corner.bl { bottom: 12px; left: 12px; border-width: 0 0 2px 2px; }
+  .frame-corner.br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; }
+
+  /* Info overlay top-right */
+  .info-badge {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 8;
+    background: rgba(26,17,8,0.82);
+    border: 1px solid rgba(232,160,32,0.2);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem;
+    line-height: 1.8;
+    color: rgba(245,230,200,0.7);
+    backdrop-filter: blur(6px);
+  }
+  .info-badge .val { color: var(--honey); font-weight: 700; }
+  .info-badge .val.hi { color: var(--found); }
+
+  /* Controls panel */
+  .controls {
+    background: rgba(26,17,8,0.96);
+    border-top: 1px solid rgba(232,160,32,0.15);
+    padding: 14px 20px 20px;
+    z-index: 10;
+    flex-shrink: 0;
+  }
+
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .slider-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: rgba(245,230,200,0.5);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    width: 80px;
+    flex-shrink: 0;
+  }
+
+  input[type=range] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 3px;
+    background: rgba(232,160,32,0.2);
+    border-radius: 2px;
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--honey);
+    cursor: pointer;
+    box-shadow: 0 0 6px rgba(232,160,32,0.5);
+  }
+
+  .slider-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--honey);
+    width: 32px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  button {
+    font-family: 'Spectral', serif;
+    flex: 1;
+    padding: 10px;
+    border: 1px solid rgba(232,160,32,0.3);
+    border-radius: 6px;
+    background: rgba(232,160,32,0.08);
+    color: var(--wax);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 0.04em;
+  }
+  button:active { background: rgba(232,160,32,0.2); transform: scale(0.98); }
+  button.primary {
+    background: var(--honey);
+    color: var(--deep);
+    border-color: var(--honey);
+    font-weight: 600;
+  }
+  button.primary:active { background: var(--amber); }
+
+  /* Mode toggle */
+  .mode-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 7px;
+    border-radius: 5px;
+    border: 1px solid rgba(232,160,32,0.2);
+    background: transparent;
+    color: rgba(245,230,200,0.45);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: all 0.2s;
+  }
+  .mode-btn.active {
+    background: rgba(232,160,32,0.15);
+    border-color: rgba(232,160,32,0.5);
+    color: var(--honey);
+  }
+
+  /* Start screen */
+  #startScreen {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    background: var(--deep);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 40px;
+  }
+
+  .hex-icon {
+    width: 80px; height: 80px;
+    position: relative;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .hex-icon svg { width: 100%; height: 100%; }
+
+  .start-title {
+    text-align: center;
+  }
+  .start-title h2 {
+    font-size: 1.6rem;
+    font-weight: 300;
+    color: var(--honey);
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .start-title p {
+    font-size: 0.82rem;
+    color: rgba(245,230,200,0.45);
+    line-height: 1.6;
+    font-weight: 300;
+  }
+
+  .feature-list {
+    list-style: none;
+    width: 100%;
+    max-width: 280px;
+  }
+  .feature-list li {
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(232,160,32,0.1);
+    font-size: 0.8rem;
+    color: rgba(245,230,200,0.6);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .feature-list li::before {
+    content: '◆';
+    color: var(--honey);
+    font-size: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  #startBtn {
+    width: 100%;
+    max-width: 280px;
+    padding: 14px;
+    font-size: 1rem;
+  }
+
+  .no-camera-msg {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(26,17,8,0.9);
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 30px;
+    font-size: 0.9rem;
+    color: rgba(245,230,200,0.6);
+    line-height: 1.6;
+    z-index: 15;
+  }
+
+  /* Freeze flash */
+  .freeze-flash {
+    position: absolute;
+    inset: 0;
+    background: white;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 6;
+    transition: opacity 0.05s;
+  }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <div class="hex-icon">
+    <svg viewBox="0 0 100 100" fill="none">
+      <polygon points="50,5 93,27.5 93,72.5 50,95 7,72.5 7,27.5" stroke="#e8a020" stroke-width="2" fill="rgba(232,160,32,0.08)"/>
+      <text x="50" y="62" text-anchor="middle" font-size="38" fill="#e8a020">🐝</text>
+    </svg>
+  </div>
+  <div class="start-title">
+    <h2>Königinnen-<br>Detektor</h2>
+    <p>Echtzeit-Erkennung per<br>Größenvergleich &amp; Farbmarkierung</p>
+  </div>
+  <ul class="feature-list">
+    <li>Erkennung markierter Königinnen (Farbpunkt)</li>
+    <li>Größenvergleich für unmarkierte Königinnen</li>
+    <li>Live-Overlay direkt im Kamerabild</li>
+    <li>Empfindlichkeit individuell einstellbar</li>
+  </ul>
+  <button class="primary" id="startBtn" onclick="startCamera()">🎥 Kamera starten</button>
+</div>
+
+<header>
+  <div class="title-group">
+    <h1>🐝 Königin-Finder</h1>
+  </div>
+  <div class="status-pill" id="statusPill">BEREIT</div>
+</header>
+
+<div class="viewport">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <canvas id="processing"></canvas>
+  <div class="frame-corner tl"></div>
+  <div class="frame-corner tr"></div>
+  <div class="frame-corner bl"></div>
+  <div class="frame-corner br"></div>
+
+  <div class="info-badge" id="infoBadge">
+    <div>Objekte: <span class="val" id="blobCount">—</span></div>
+    <div>Kandidaten: <span class="val" id="candCount">—</span></div>
+    <div>Konfidenz: <span class="val hi" id="confVal">—</span></div>
+  </div>
+
+  <div class="freeze-flash" id="freezeFlash"></div>
+  <div class="no-camera-msg" id="noCameraMsg">
+    Kamerazugriff verweigert oder nicht verfügbar.<br><br>
+    Bitte Kameraberechtigung im Browser erteilen und Seite neu laden.
+  </div>
+</div>
+
+<div class="controls">
+  <div class="mode-row">
+    <button class="mode-btn active" id="modeSize" onclick="setMode('size')">NUR GRÖSSE</button>
+    <button class="mode-btn" id="modeColor" onclick="setMode('color')">NUR FARBE</button>
+    <button class="mode-btn" id="modeBoth" onclick="setMode('both')">KOMBINIERT</button>
+  </div>
+
+  <div class="slider-row">
+    <span class="slider-label">Größenfaktor</span>
+    <input type="range" id="sizeThresh" min="1.1" max="2.5" step="0.05" value="1.4">
+    <span class="slider-val" id="sizeVal">1.4×</span>
+  </div>
+  <div class="slider-row">
+    <span class="slider-label">Empfindlichkeit</span>
+    <input type="range" id="sensitivity" min="10" max="80" step="5" value="30">
+    <span class="slider-val" id="sensVal">30</span>
+  </div>
+
+  <div class="btn-row">
+    <button onclick="toggleFreeze()">📷 Einfrieren</button>
+    <button onclick="switchCamera()">🔄 Kamera</button>
+    <button class="primary" onclick="resetDetection()">↺ Reset</button>
+  </div>
+</div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+let stream = null;
+let frozen = false;
+let frozenFrame = null;
+let animFrame = null;
+let facingMode = 'environment';
+let detectionMode = 'size'; // 'size' | 'color' | 'both'
+let queenHistory = []; // rolling average for stable detection
+const HISTORY_LEN = 5;
+
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const proc = document.getElementById('processing');
+const ctx = overlay.getContext('2d');
+const pctx = proc.getContext('2d', { willReadFrequently: true });
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+async function startCamera() {
+  document.getElementById('startScreen').style.display = 'none';
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    resizeCanvases();
+    loop();
+  } catch (e) {
+    document.getElementById('noCameraMsg').style.display = 'flex';
+    console.error(e);
+  }
+}
+
+async function switchCamera() {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  if (stream) { stream.getTracks().forEach(t => t.stop()); }
+  frozen = false;
+  await startCamera();
+}
+
+function resizeCanvases() {
+  const vw = video.videoWidth || video.clientWidth;
+  const vh = video.videoHeight || video.clientHeight;
+  overlay.width = proc.width = vw;
+  overlay.height = proc.height = vh;
+}
+
+// ─── Sliders ─────────────────────────────────────────────────────────────────
+const sizeSlider = document.getElementById('sizeThresh');
+const sensSlider = document.getElementById('sensitivity');
+sizeSlider.addEventListener('input', () => {
+  document.getElementById('sizeVal').textContent = parseFloat(sizeSlider.value).toFixed(2) + '×';
+});
+sensSlider.addEventListener('input', () => {
+  document.getElementById('sensVal').textContent = sensSlider.value;
+});
+
+function setMode(m) {
+  detectionMode = m;
+  ['modeSize','modeColor','modeBoth'].forEach(id => document.getElementById(id).classList.remove('active'));
+  document.getElementById('mode' + m.charAt(0).toUpperCase() + m.slice(1)).classList.add('active');
+}
+
+// ─── Freeze ───────────────────────────────────────────────────────────────────
+function toggleFreeze() {
+  if (!frozen) {
+    // Flash effect
+    const flash = document.getElementById('freezeFlash');
+    flash.style.opacity = '0.7';
+    setTimeout(() => flash.style.opacity = '0', 150);
+    // Capture current frame
+    frozenFrame = pctx.getImageData(0, 0, proc.width, proc.height);
+    frozen = true;
+    document.querySelector('.btn-row button').textContent = '▶ Fortfahren';
+  } else {
+    frozen = false;
+    frozenFrame = null;
+    document.querySelector('.btn-row button').textContent = '📷 Einfrieren';
+  }
+}
+
+function resetDetection() {
+  queenHistory = [];
+  frozen = false;
+  frozenFrame = null;
+  document.querySelector('.btn-row button').textContent = '📷 Einfrieren';
+  document.getElementById('statusPill').textContent = 'BEREIT';
+  document.getElementById('statusPill').className = 'status-pill';
+}
+
+// ─── Main Loop ────────────────────────────────────────────────────────────────
+function loop() {
+  animFrame = requestAnimationFrame(loop);
+  if (!frozen) {
+    if (video.readyState < 2) return;
+    if (proc.width !== video.videoWidth) resizeCanvases();
+    pctx.drawImage(video, 0, 0, proc.width, proc.height);
+  } else if (frozenFrame) {
+    pctx.putImageData(frozenFrame, 0, 0);
+  }
+  detect();
+}
+
+// ─── Detection ────────────────────────────────────────────────────────────────
+function detect() {
+  const W = proc.width, H = proc.height;
+  if (!W || !H) return;
+
+  const imageData = pctx.getImageData(0, 0, W, H);
+  const data = imageData.data;
+
+  const minArea = parseInt(sensSlider.value);
+  const sizeRatio = parseFloat(sizeSlider.value);
+
+  // 1. Build grayscale + extract blobs via simple row-scan segmentation
+  // We work with a downsampled grid for performance
+  const SCALE = 4; // process every 4th pixel
+  const SW = Math.floor(W / SCALE), SH = Math.floor(H / SCALE);
+
+  // Brightness + color maps
+  const bright = new Uint8Array(SW * SH);
+  const hueMap = new Float32Array(SW * SH);
+  const satMap = new Uint8Array(SW * SH);
+
+  for (let sy = 0; sy < SH; sy++) {
+    for (let sx = 0; sx < SW; sx++) {
+      const px = (sy * SCALE * W + sx * SCALE) * 4;
+      const r = data[px], g = data[px+1], b = data[px+2];
+      bright[sy * SW + sx] = Math.round(0.299*r + 0.587*g + 0.114*b);
+      const [h, s] = rgbToHs(r, g, b);
+      hueMap[sy * SW + sx] = h;
+      satMap[sy * SW + sx] = s;
+    }
+  }
+
+  // 2. Find connected components (blobs) using flood-fill on thresholded bright
+  const threshold = 60; // pixels darker than this are "bee" on bright comb
+  // Adaptive: use mean brightness to decide approach
+  let meanBright = 0;
+  for (let i = 0; i < bright.length; i++) meanBright += bright[i];
+  meanBright /= bright.length;
+
+  // Label map
+  const labels = new Int32Array(SW * SH).fill(-1);
+  let labelCount = 0;
+  const blobStats = []; // {minX, maxX, minY, maxY, pixels, sumHue, sumSat, colorPixels}
+
+  // Decide: bees are darker than background (light comb) or we just look for any connected region
+  // We'll segment by finding regions of similar brightness using a simple threshold
+  const isBee = (i) => {
+    if (meanBright > 120) {
+      // Light background (empty comb / flash) → bees are darker
+      return bright[i] < meanBright - 25;
+    } else {
+      // Dark background → bees are lighter than very dark areas but still organic
+      return bright[i] > 30 && bright[i] < 220;
+    }
+  };
+
+  const stack = [];
+  for (let i = 0; i < SW * SH; i++) {
+    if (labels[i] !== -1 || !isBee(i)) continue;
+    // BFS
+    const label = labelCount++;
+    const stat = { minX: SW, maxX: 0, minY: SH, maxY: 0, pixels: 0, sumHue: 0, sumSat: 0, colorPixels: 0 };
+    stack.length = 0;
+    stack.push(i);
+    labels[i] = label;
+    while (stack.length) {
+      const cur = stack.pop();
+      const cx = cur % SW, cy = Math.floor(cur / SW);
+      stat.pixels++;
+      stat.minX = Math.min(stat.minX, cx);
+      stat.maxX = Math.max(stat.maxX, cx);
+      stat.minY = Math.min(stat.minY, cy);
+      stat.maxY = Math.max(stat.maxY, cy);
+      // Check for color marking (saturated, non-bee-brown hue)
+      const s = satMap[cur], h = hueMap[cur];
+      if (s > 80 && isMarkerColor(h)) {
+        stat.sumHue += h;
+        stat.sumSat += s;
+        stat.colorPixels++;
+      }
+      // 4-neighbors
+      const neighbors = [cur-1, cur+1, cur-SW, cur+SW];
+      for (const n of neighbors) {
+        if (n < 0 || n >= SW*SH) continue;
+        if (labels[n] !== -1) continue;
+        const nx = n % SW;
+        if (Math.abs(nx - (cx)) > 1 && (n === cur-1 || n === cur+1)) continue; // wrap guard
+        if (isBee(n)) { labels[n] = label; stack.push(n); }
+      }
+    }
+    if (stat.pixels >= minArea) blobStats.push(stat);
+  }
+
+  // 3. Compute blob dimensions in original pixels
+  const blobs = blobStats.map(s => ({
+    x: s.minX * SCALE,
+    y: s.minY * SCALE,
+    w: (s.maxX - s.minX + 1) * SCALE,
+    h: (s.maxY - s.minY + 1) * SCALE,
+    area: s.pixels * SCALE * SCALE,
+    colorScore: s.colorPixels / Math.max(s.pixels, 1),
+    hasMarker: s.colorPixels > 3
+  }));
+
+  // 4. Score each blob as potential queen
+  // Median area = typical worker bee
+  blobs.sort((a, b) => a.area - b.area);
+  const medianArea = blobs.length ? blobs[Math.floor(blobs.length / 2)].area : 0;
+  const medianAspect = 2.2; // typical worker bee elongation
+
+  const scored = blobs.map(b => {
+    let score = 0;
+    const relSize = medianArea > 0 ? b.area / medianArea : 1;
+    const aspect = b.w > b.h ? b.w / b.h : b.h / b.w;
+
+    // Size scoring
+    if (detectionMode !== 'color') {
+      if (relSize >= sizeRatio) {
+        score += Math.min(60, (relSize - 1) * 40);
+      }
+      // Elongation bonus (queen is more elongated)
+      if (aspect > medianAspect * 0.8) score += 15;
+    }
+
+    // Color scoring
+    if (detectionMode !== 'size') {
+      if (b.hasMarker) score += 80;
+      score += b.colorScore * 40;
+    }
+
+    // In 'both' mode: combine
+    return { ...b, score, relSize };
+  });
+
+  // 5. Find best candidate
+  scored.sort((a, b) => b.score - a.score);
+  const queen = scored.length > 0 && scored[0].score > 15 ? scored[0] : null;
+
+  // Rolling history for stability
+  queenHistory.push(queen ? 1 : 0);
+  if (queenHistory.length > HISTORY_LEN) queenHistory.shift();
+  const confidence = queenHistory.reduce((a, b) => a + b, 0) / queenHistory.length;
+
+  // 6. Draw overlay
+  ctx.clearRect(0, 0, W, H);
+
+  // Draw all candidate blobs (faint)
+  if (scored.length > 0) {
+    scored.slice(0, 20).forEach((b, i) => {
+      if (i === 0 && b.score > 15) return; // skip queen, drawn separately
+      if (b.score > 5) {
+        ctx.strokeStyle = 'rgba(232,160,32,0.2)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
+      }
+    });
+  }
+
+  // Draw queen detection
+  if (queen && queen.score > 15) {
+    const cx = queen.x + queen.w / 2;
+    const cy = queen.y + queen.h / 2;
+    const r = Math.max(queen.w, queen.h) / 2 + 18;
+
+    // Outer glow ring
+    const grad = ctx.createRadialGradient(cx, cy, r * 0.6, cx, cy, r + 20);
+    grad.addColorStop(0, 'rgba(0,255,136,0.25)');
+    grad.addColorStop(1, 'rgba(0,255,136,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 20, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Animated dashes circle
+    ctx.save();
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 5]);
+    ctx.lineDashOffset = -Date.now() / 40;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // Inner crosshair lines
+    ctx.strokeStyle = 'rgba(0,255,136,0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(cx - r - 10, cy); ctx.lineTo(cx + r + 10, cy);
+    ctx.moveTo(cx, cy - r - 10); ctx.lineTo(cx, cy + r + 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Bounding box
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(queen.x - 4, queen.y - 4, queen.w + 8, queen.h + 8);
+
+    // Label tag
+    const tag = queen.hasMarker ? '♛ KÖNIGIN (markiert)' : '♛ KÖNIGIN (Grösse)';
+    ctx.font = 'bold 13px JetBrains Mono, monospace';
+    const tw = ctx.measureText(tag).width;
+    const tx = Math.max(4, Math.min(W - tw - 12, cx - tw / 2));
+    const ty = queen.y - 14 < 20 ? queen.y + queen.h + 22 : queen.y - 10;
+    ctx.fillStyle = 'rgba(0,20,10,0.8)';
+    ctx.roundRect(tx - 6, ty - 14, tw + 12, 20, 4);
+    ctx.fill();
+    ctx.fillStyle = '#00ff88';
+    ctx.fillText(tag, tx, ty);
+
+    // Score badge
+    const scoreTxt = `Score: ${Math.round(queen.score)} | ${(queen.relSize).toFixed(1)}× Median`;
+    ctx.font = '10px JetBrains Mono, monospace';
+    const sw2 = ctx.measureText(scoreTxt).width;
+    ctx.fillStyle = 'rgba(0,20,10,0.7)';
+    ctx.roundRect(tx - 6, ty + 6, sw2 + 12, 16, 3);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,255,136,0.7)';
+    ctx.fillText(scoreTxt, tx, ty + 18);
+  }
+
+  // 7. Update UI
+  const pill = document.getElementById('statusPill');
+  if (queen && queen.score > 15) {
+    pill.textContent = '♛ GEFUNDEN';
+    pill.className = 'status-pill found';
+  } else {
+    pill.textContent = 'SUCHE...';
+    pill.className = 'status-pill';
+  }
+
+  document.getElementById('blobCount').textContent = blobs.length;
+  document.getElementById('candCount').textContent = scored.filter(b => b.score > 5).length;
+  document.getElementById('confVal').textContent = Math.round(confidence * 100) + '%';
+}
+
+// ─── Color Helpers ─────────────────────────────────────────────────────────────
+function rgbToHs(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b);
+  const d = max - min;
+  const s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  return [h * 360, Math.round(s * 100)];
+}
+
+// Standard international queen marking colors:
+// White (0), Yellow (1), Red (2), Green (3), Blue (4)
+// Also detect generic bright non-bee colors
+function isMarkerColor(h) {
+  // Yellow/white: 30-70°
+  if (h >= 30 && h <= 75) return true;
+  // Red/pink: 345-360 or 0-20
+  if (h >= 345 || h <= 20) return true;
+  // Green: 90-150
+  if (h >= 90 && h <= 150) return true;
+  // Blue: 200-260
+  if (h >= 200 && h <= 260) return true;
+  return false;
+}
+
+// ─── CanvasRenderingContext2D.roundRect polyfill for older browsers
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.lineTo(x + w - r, y);
+    this.quadraticCurveTo(x + w, y, x + w, y + r);
+    this.lineTo(x + w, y + h - r);
+    this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    this.lineTo(x + r, y + h);
+    this.quadraticCurveTo(x, y + h, x, y + h - r);
+    this.lineTo(x, y + r);
+    this.quadraticCurveTo(x, y, x + r, y);
+    this.closePath();
+  };
+}
+
+window.addEventListener('resize', resizeCanvases);
+</script>
+</body>
+</html>
