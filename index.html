@@ -467,14 +467,36 @@ async function runInference() {
     pctx.putImageData(frozenFrame, 0, 0);
   }
 
-  // Downscale to max 640px for speed
+  // ── Landscape normalisation ──────────────────────────────────────────────
+  // The model was trained on landscape images. In portrait mode (H > W) we
+  // rotate 90° CW before sending so the model always sees a landscape frame.
+  // Coordinates are rotated back after the API response.
+  const srcW = proc.width, srcH = proc.height;
+  const needsRotation = srcH > srcW;
   const MAX = 640;
-  const scale = Math.min(1, MAX / Math.max(proc.width || 1, proc.height || 1));
-  const rw = Math.round(proc.width * scale);
-  const rh = Math.round(proc.height * scale);
   const tmp = document.createElement('canvas');
-  tmp.width = rw; tmp.height = rh;
-  tmp.getContext('2d').drawImage(proc, 0, 0, rw, rh);
+
+  if (needsRotation) {
+    const scale = Math.min(1, MAX / Math.max(srcH, srcW));
+    tmp.width  = Math.round(srcH * scale);  // rotated: landscape W = original H
+    tmp.height = Math.round(srcW * scale);  // rotated: landscape H = original W
+    const tc = tmp.getContext('2d');
+    tc.save();
+    tc.translate(tmp.width / 2, tmp.height / 2);
+    tc.rotate(Math.PI / 2);                 // 90° CW
+    tc.drawImage(proc, -tmp.height / 2, -tmp.width / 2, tmp.height, tmp.width);
+    tc.restore();
+  } else {
+    const scale = Math.min(1, MAX / Math.max(srcW, srcH));
+    tmp.width  = Math.round(srcW * scale);
+    tmp.height = Math.round(srcH * scale);
+    tmp.getContext('2d').drawImage(proc, 0, 0, tmp.width, tmp.height);
+  }
+
+  runInference._rotated = needsRotation;
+  runInference._srcW    = srcW;
+  runInference._srcH    = srcH;
+
   const base64 = tmp.toDataURL('image/jpeg', 0.85).split(',')[1];
 
   const t0 = Date.now();
@@ -492,7 +514,10 @@ async function runInference() {
     setApiStatus('ok', `✓ OK — ${latency}ms`);
 
     const minConf = parseInt(document.getElementById('confSlider').value) / 100;
-    parseAndStore(data, minConf, proc.width, proc.height, rw, rh);
+    parseAndStore(data, minConf,
+      runInference._srcW, runInference._srcH,
+      tmp.width, tmp.height,
+      runInference._rotated);
 
   } catch(err) {
     setApiStatus('err', '✗ ' + err.message.slice(0, 45));
@@ -505,15 +530,33 @@ async function runInference() {
   }
 }
 
-function parseAndStore(data, minConf, origW, origH, scaledW, scaledH) {
-  const sx = origW / scaledW, sy = origH / scaledH;
+function parseAndStore(data, minConf, origW, origH, scaledW, scaledH, rotated) {
+  // scaledW/H are the dimensions of the image actually sent to the API.
+  // If rotated=true the sent image was landscape (W=origH, H=origW).
+  // Roboflow returns coordinates in the sent-image space → we must invert.
+  const sx = (rotated ? origH : origW) / scaledW;
+  const sy = (rotated ? origW : origH) / scaledH;
   const preds = (data.predictions || []).filter(p => p.confidence >= minConf);
 
   lastAiDets = preds.map(p => {
-    const w = p.width  * sx, h = p.height * sy;
-    const x = p.x * sx - w / 2, y = p.y * sy - h / 2;
+    // Map prediction back to the rotated-image space (in original-image pixels)
+    let cx = p.x * sx, cy = p.y * sy;
+    let bw = p.width * sx, bh = p.height * sy;
+
+    if (rotated) {
+      // Undo 90° CW rotation:  (cx, cy) in landscape → (cy, origH - cx) in portrait
+      // origH here is the portrait height (= landscape width of sent image * sx)
+      const imgH = origH; // portrait height
+      const newCx = cy;
+      const newCy = imgH - cx;
+      cx = newCx; cy = newCy;
+      // Swap box dimensions too
+      [bw, bh] = [bh, bw];
+    }
+
+    const x = cx - bw / 2, y = cy - bh / 2;
     const lbl = (p.class || '').toLowerCase();
-    return { x, y, w, h, conf: p.confidence, label: p.class || 'bee',
+    return { x, y, w: bw, h: bh, conf: p.confidence, label: p.class || 'bee',
              isQueen: lbl.includes('queen') };
   });
 
