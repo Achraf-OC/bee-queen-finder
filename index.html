@@ -300,9 +300,8 @@
       <span class="slider-val" id="confSliderVal">40%</span>
     </div>
     <div class="btn-row">
-      <button onclick="toggleFreeze()">📷 Einfrieren</button>
-      <button onclick="toggleAi()" id="aiToggleBtn">⏸ Pause</button>
-      <button class="primary" onclick="resetAll()">↺ Reset</button>
+      <button class="primary" onclick="captureAndAnalyse()" id="captureBtn">📷 Foto analysieren</button>
+      <button onclick="resetAll()">↺ Reset</button>
     </div>
   </div>
 
@@ -319,8 +318,8 @@
       <span class="slider-val" id="sensVal">30</span>
     </div>
     <div class="btn-row">
-      <button onclick="toggleFreeze()">📷 Einfrieren</button>
-      <button class="primary" onclick="resetAll()">↺ Reset</button>
+      <button class="primary" onclick="captureAndAnalyse()">📷 Foto analysieren</button>
+      <button onclick="resetAll()">↺ Reset</button>
     </div>
   </div>
 
@@ -776,19 +775,37 @@ function runClassicDetection() {
 // ══════════════════════════════════════════════════════════════════════════════
 //  CONTROLS
 // ══════════════════════════════════════════════════════════════════════════════
-function toggleFreeze() {
-  if(!frozen){
-    flashEl('captureFlash');
-    if(video.readyState>=2) pctx.drawImage(video,0,0,proc.width,proc.height);
-    frozenFrame=pctx.getImageData(0,0,proc.width,proc.height);
-    frozen=true;
-  } else { frozen=false; frozenFrame=null; }
-}
+// Einmaliges Foto aufnehmen, analysieren, Ergebnis eingefroren anzeigen
+// Zweiter Druck: zurück zum Live-Modus
+async function captureAndAnalyse() {
+  const btn = document.getElementById('captureBtn');
+  if (frozen) {
+    // ── Live-Modus wiederherstellen ──
+    frozen = false; frozenFrame = null;
+    lastAiDets = [];
+    btn.textContent = '📷 Foto analysieren';
+    btn.classList.add('primary');
+    setStatus('', 'LIVE');
+    scheduleInference();
+    return;
+  }
 
-function toggleAi() {
-  aiPaused=!aiPaused;
-  document.getElementById('aiToggleBtn').textContent=aiPaused?'▶ Start':'⏸ Pause';
-  if(!aiPaused) runInference();
+  // ── Foto einfrieren & sofort analysieren ──
+  flashEl('captureFlash');
+  if (video.readyState < 2) return;
+  if (proc.width !== video.videoWidth) resizeCanvases();
+  pctx.drawImage(video, 0, 0, proc.width, proc.height);
+  frozenFrame = pctx.getImageData(0, 0, proc.width, proc.height);
+  frozen = true;
+
+  // Timer stoppen – kein automatisches Neu-Senden mehr
+  if (inferenceTimer) { clearInterval(inferenceTimer); inferenceTimer = null; }
+
+  btn.textContent = '▶ Zurück zu Live';
+  btn.classList.remove('primary');
+
+  // Sofort einmal analysieren
+  await runInference();
 }
 
 function resetAll() {
